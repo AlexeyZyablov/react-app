@@ -1,0 +1,145 @@
+image: node
+
+stages:
+  - build
+  - test build
+  - deploy review
+  - test deploy review
+  - deploy staging
+  - test staging
+  - deploy production
+  - test production
+
+variables:
+  STAGING_DOMAIN: staging-aris-c2.surge.sh
+  PRODUCTION_DOMAIN: aris-c2.surge.sh
+  REVIEW_DOMAIN: $CI_COMMIT_REF_NAME.aris-c2.surge.sh
+
+# cache:
+#   key: ${CI_COMMIT_REF_SLUG}
+#   paths:
+#     - node_modules/1f53c85dbd72eab518b19f957757b0d4
+
+build website:
+  stage: build
+  only:
+    - merge_request
+    - main
+  script:
+    - npm install
+    - echo "$CI_COMMIT_REF_NAME"
+    - sed -i "s/%%STAGING%%/$CI_COMMIT_REF_NAME/" ./src/App.js    
+    - sed -i "s/%%VERSION%%/$CI_COMMIT_SHORT_SHA/" ./src/App.js
+    - sed -i "s/%%VERSION%%/$CI_COMMIT_SHORT_SHA/" ./public/index.html
+    - cat ./src/App.js | grep -q "$CI_COMMIT_SHORT_SHA"
+    - npm run build
+  artifacts:
+    paths:
+      - ./build
+
+test build:
+  stage: test build
+  only:
+    - merge_request
+    - main
+  script:
+    - npm install
+    - npm install -g serve
+    - serve -s build &
+    - sleep 10
+    - curl "http://localhost:3000/" | grep "$CI_COMMIT_SHORT_SHA"
+
+.base_deploy: &base_deploy
+  script:
+    - echo "deploy to $DOMAIN"
+    - npm install --global surge
+    - surge --project ./build --domain $DOMAIN
+
+.base_review: &base_review
+  environment:
+    name: $CI_COMMIT_REF_NAME
+    url: http://$DOMAIN
+  variables:
+    DOMAIN: $REVIEW_DOMAIN
+  only:
+    - merge_request
+
+.base_main: &base_main
+  only:
+    - main
+
+.base_test: &base_test
+  image: alpine
+  script:
+    - apk add curl
+    - echo "test domain $DOMAIN"
+    - curl "http://$DOMAIN"
+    - curl "http://$DOMAIN" | grep "$CI_COMMIT_SHORT_SHA"
+
+.base_staging: &base_staging
+  environment:
+    name: staging
+    url: http://$DOMAIN
+  variables:
+    DOMAIN: $STAGING_DOMAIN
+
+deploy review:
+  stage: deploy review
+  environment:
+    on_stop: stop review
+  <<: *base_deploy
+  extends: .base_review
+
+stop review:
+  stage: deploy review
+  variables:
+    GIT_STRATEGY: none
+  extends: .base_review
+  script:
+    - echo "teardown $DOMAIN"
+    - npm install --global surge
+    - surge teardown $DOMAIN
+  when: manual
+  environment:
+    action: stop
+
+test deploy review:
+  stage: test deploy review
+  extends: .base_review
+  <<: *base_test
+
+deploy staging:
+  stage: deploy staging
+  only:
+    - main
+  extends: .base_staging
+  <<: *base_deploy
+
+test staging:
+  stage: test staging
+  only:
+    - main
+  extends: .base_staging
+  <<: *base_test
+
+.base_production: &base_production
+  stage: deploy production
+  environment:
+    name: production
+  variables:
+    DOMAIN: $PRODUCTION_DOMAIN
+
+deploy production:
+  when: manual
+  only:
+    - main
+  extends: .base_production
+  <<: *base_deploy
+
+test production:
+  needs:
+    - deploy production
+  only:
+    - main
+  extends: .base_production
+  <<: *base_test
